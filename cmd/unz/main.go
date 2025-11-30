@@ -108,6 +108,12 @@ func printListing(archivePath string, files []*compress.FileInfo, verbose bool) 
 				timeStr = "-----"
 			}
 
+			// Format name with symlink indicator
+			name := info.Name
+			if info.Mode&os.ModeSymlink != 0 {
+				name = fmt.Sprintf("%s -> (symlink)", info.Name)
+			}
+
 			fmt.Printf("%8d  %-6s  %8d %3d%% %s %s %08x  %s\n",
 				info.Size,
 				info.Method.String(),
@@ -116,7 +122,7 @@ func printListing(archivePath string, files []*compress.FileInfo, verbose bool) 
 				dateStr,
 				timeStr,
 				info.CRC32,
-				info.Name)
+				name)
 
 			totalSize += info.Size
 			totalComp += info.CompSize
@@ -142,11 +148,17 @@ func printListing(archivePath string, files []*compress.FileInfo, verbose bool) 
 				timeStr = "-----"
 			}
 
+			// Format name with symlink indicator
+			name := info.Name
+			if info.Mode&os.ModeSymlink != 0 {
+				name = fmt.Sprintf("%s -> (symlink)", info.Name)
+			}
+
 			fmt.Printf("%9d  %s %s   %s\n",
 				info.Size,
 				dateStr,
 				timeStr,
-				info.Name)
+				name)
 
 			totalSize += info.Size
 		}
@@ -222,9 +234,12 @@ func extractFiles(archivePath string, data []byte, files []*compress.FileInfo, p
 			continue
 		}
 
+		// Check if this is a symlink
+		isSymlink := info.Mode&os.ModeSymlink != 0
+
 		// Check if output exists
 		if !*overwrite && !*pipe {
-			if _, err := os.Stat(outputPath); err == nil {
+			if _, err := os.Lstat(outputPath); err == nil {
 				if *never {
 					if !*quiet {
 						fmt.Printf("  skipping: %s\n", outputPath)
@@ -246,29 +261,52 @@ func extractFiles(archivePath string, data []byte, files []*compress.FileInfo, p
 					fmt.Println("  skipping:", outputPath)
 					continue
 				}
+				// Remove existing file/symlink before replacing
+				os.Remove(outputPath)
 			}
 		}
 
-		// Decompress
-		if !*quiet && !*pipe {
-			fmt.Printf("  inflating: %s\n", outputPath)
-		}
-
+		// Decompress to get content
 		content, err := decomp.DecompressFile(data, info)
 		if err != nil {
 			fatal("decompression failed for '%s': %v", info.Name, err)
 		}
 
-		// Write output
+		// Handle output
 		if *pipe {
+			// Pipe mode: just output content (symlink target for symlinks)
 			os.Stdout.Write(content)
-		} else {
-			// Create parent directories if needed
-			if dir := filepath.Dir(outputPath); dir != "." {
-				os.MkdirAll(dir, 0755)
+			continue
+		}
+
+		// Create parent directories if needed
+		if dir := filepath.Dir(outputPath); dir != "." {
+			os.MkdirAll(dir, 0755)
+		}
+
+		if isSymlink {
+			// Create symlink
+			target := string(content)
+			if !*quiet {
+				fmt.Printf("    linking: %s -> %s\n", outputPath, target)
 			}
 
-			if err := os.WriteFile(outputPath, content, info.Mode); err != nil {
+			// Remove any existing file first (in case -o was set)
+			os.Remove(outputPath)
+
+			if err := os.Symlink(target, outputPath); err != nil {
+				fatal("cannot create symlink '%s': %v", outputPath, err)
+			}
+
+			// Note: Cannot set mtime on symlinks portably in Go
+			// os.Lchtimes doesn't exist, and os.Chtimes follows symlinks
+		} else {
+			// Regular file
+			if !*quiet {
+				fmt.Printf("  inflating: %s\n", outputPath)
+			}
+
+			if err := os.WriteFile(outputPath, content, info.Mode&os.ModePerm); err != nil {
 				fatal("cannot write '%s': %v", outputPath, err)
 			}
 

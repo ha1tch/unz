@@ -2,6 +2,7 @@ package compress
 
 import (
 	"bytes"
+	"os"
 	"testing"
 	"time"
 
@@ -242,7 +243,7 @@ func TestCompressSpecialNames(t *testing.T) {
 		"UPPERCASE.TXT",
 		"MixedCase.Txt",
 		"файл.txt", // Cyrillic
-		"文件.txt",  // Chinese
+		"文件.txt",   // Chinese
 	}
 
 	for _, name := range names {
@@ -275,8 +276,8 @@ func TestVarints(t *testing.T) {
 		{256},
 		{1000},
 		{0, 128, 256, 1000, 10000},
-		{16383},  // max 2-byte varint
-		{16384},  // min 3-byte varint
+		{16383}, // max 2-byte varint
+		{16384}, // min 3-byte varint
 	}
 
 	for _, values := range testCases {
@@ -399,7 +400,7 @@ func TestVocabInfo(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			extra := makeVocabInfo(tc.info)
-			
+
 			// Parse it back
 			parsed, ok := parseVocabInfo(extra)
 			if !ok {
@@ -520,6 +521,203 @@ func TestTypeStrings(t *testing.T) {
 	for _, tc := range markups {
 		if got := tc.m.String(); got != tc.want {
 			t.Errorf("MarkupLang(%d).String(): got %q, want %q", tc.m, got, tc.want)
+		}
+	}
+}
+
+// === Multi-file Archive Tests ===
+
+func TestArchiveMultipleFiles(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	files := []struct {
+		name    string
+		content string
+	}{
+		{"file1.txt", "Hello, World!"},
+		{"file2.txt", "Another file with some content."},
+		{"src/main.go", "package main\n\nfunc main() {}\n"},
+	}
+
+	for _, f := range files {
+		err := archive.Add([]byte(f.content), f.name, time.Now(), 0644)
+		if err != nil {
+			t.Fatalf("Add(%s): %v", f.name, err)
+		}
+	}
+
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	if !IsValidFormat(data) {
+		t.Fatal("Archive is not valid ZIP format")
+	}
+
+	infos, err := ListFiles(data)
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+
+	if len(infos) != len(files) {
+		t.Errorf("ListFiles: got %d files, want %d", len(infos), len(files))
+	}
+
+	for i, f := range files {
+		if infos[i].Name != f.name {
+			t.Errorf("File %d: name = %q, want %q", i, infos[i].Name, f.name)
+		}
+	}
+}
+
+func TestArchiveWithDirectories(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	archive.AddDirectory("mydir", time.Now(), 0755)
+	archive.Add([]byte("file content"), "mydir/file.txt", time.Now(), 0644)
+
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	infos, err := ListFiles(data)
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+
+	if len(infos) != 2 {
+		t.Fatalf("ListFiles: got %d entries, want 2", len(infos))
+	}
+
+	if infos[0].Name != "mydir/" {
+		t.Errorf("Directory name = %q, want %q", infos[0].Name, "mydir/")
+	}
+	if infos[0].Mode&os.ModeDir == 0 {
+		t.Errorf("Directory mode should have ModeDir set")
+	}
+}
+
+func TestArchiveSymlink(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	// Add a symlink
+	target := "subdir/target.txt"
+	err := archive.AddSymlink("link.txt", target, time.Now(), 0777)
+	if err != nil {
+		t.Fatalf("AddSymlink: %v", err)
+	}
+
+	// Add a regular file
+	archive.Add([]byte("target content"), "subdir/target.txt", time.Now(), 0644)
+
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	infos, err := ListFiles(data)
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+
+	if len(infos) != 2 {
+		t.Fatalf("Expected 2 entries, got %d", len(infos))
+	}
+
+	// First should be symlink
+	if infos[0].Mode&os.ModeSymlink == 0 {
+		t.Errorf("Symlink mode should have ModeSymlink set, got %v", infos[0].Mode)
+	}
+
+	// Extract symlink - content should be target path
+	content, err := comp.DecompressFile(data, infos[0])
+	if err != nil {
+		t.Fatalf("DecompressFile: %v", err)
+	}
+	if string(content) != target {
+		t.Errorf("Symlink content = %q, want %q", string(content), target)
+	}
+}
+
+func TestDecompressAll(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	files := map[string]string{
+		"a.txt":     "Content of A",
+		"b.txt":     "Content of B",
+		"dir/c.txt": "Content of C",
+	}
+
+	archive.AddDirectory("dir", time.Now(), 0755)
+	for name, content := range files {
+		archive.Add([]byte(content), name, time.Now(), 0644)
+	}
+
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	extracted, err := comp.DecompressAll(data)
+	if err != nil {
+		t.Fatalf("DecompressAll(): %v", err)
+	}
+
+	if len(extracted) != len(files) {
+		t.Errorf("DecompressAll: got %d files, want %d", len(extracted), len(files))
+	}
+
+	for name, want := range files {
+		got, ok := extracted[name]
+		if !ok {
+			t.Errorf("DecompressAll: missing file %q", name)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("DecompressAll(%s): got %q, want %q", name, string(got), want)
+		}
+	}
+}
+
+func TestListFilesEmpty(t *testing.T) {
+	_, err := ListFiles(nil)
+	if err != ErrTooShort {
+		t.Errorf("ListFiles(nil): got %v, want ErrTooShort", err)
+	}
+}
+
+func TestModeConversion(t *testing.T) {
+	tests := []struct {
+		name     string
+		goMode   os.FileMode
+		wantType uint32
+	}{
+		{"regular file", 0644, 0100000},
+		{"directory", os.ModeDir | 0755, 0040000},
+		{"symlink", os.ModeSymlink | 0777, 0120000},
+	}
+
+	for _, tc := range tests {
+		unixMode := goModeToUnix(tc.goMode)
+		gotType := unixMode & 0170000
+		if gotType != tc.wantType {
+			t.Errorf("%s: goModeToUnix type = %06o, want %06o", tc.name, gotType, tc.wantType)
+		}
+
+		// Round-trip
+		goMode := unixModeToGo(unixMode)
+		if tc.goMode&os.ModeType != goMode&os.ModeType {
+			t.Errorf("%s: round-trip type mismatch: %v != %v", tc.name, tc.goMode&os.ModeType, goMode&os.ModeType)
 		}
 	}
 }

@@ -90,42 +90,42 @@ type BenchmarkResult struct {
 	OriginalB   int    `json:"original_bytes"`
 
 	// Compression results (compressed size in bytes)
-	EnzSize      int    `json:"enz_size"`
-	EnzMethod    string `json:"enz_method"`
-	ZipSize      int    `json:"zip_size"`
-	GzipSize     int    `json:"gzip_size"`
-	DeflateOnly  int    `json:"deflate_only"`  // Raw DEFLATE (no container)
-	BpelateOnly  int    `json:"bpelate_only"`  // Raw BPELATE (no container)
-	UnzlateOnly  int    `json:"unzlate_only"`  // Raw UNZLATE (no container)
+	EnzSize     int    `json:"enz_size"`
+	EnzMethod   string `json:"enz_method"`
+	ZipSize     int    `json:"zip_size"`
+	GzipSize    int    `json:"gzip_size"`
+	DeflateOnly int    `json:"deflate_only"` // Raw DEFLATE (no container)
+	BpelateOnly int    `json:"bpelate_only"` // Raw BPELATE (no container)
+	UnzlateOnly int    `json:"unzlate_only"` // Raw UNZLATE (no container)
 
 	// Derived metrics
-	EnzRatio     float64 `json:"enz_ratio"`     // Compression ratio (0-1, lower is better)
-	ZipRatio     float64 `json:"zip_ratio"`
-	GzipRatio    float64 `json:"gzip_ratio"`
-	EnzVsZip     float64 `json:"enz_vs_zip"`    // % improvement over zip (positive = enz wins)
-	EnzVsGzip    float64 `json:"enz_vs_gzip"`
-	Winner       string  `json:"winner"`        // "enz", "zip", or "gzip"
+	EnzRatio  float64 `json:"enz_ratio"` // Compression ratio (0-1, lower is better)
+	ZipRatio  float64 `json:"zip_ratio"`
+	GzipRatio float64 `json:"gzip_ratio"`
+	EnzVsZip  float64 `json:"enz_vs_zip"` // % improvement over zip (positive = enz wins)
+	EnzVsGzip float64 `json:"enz_vs_gzip"`
+	Winner    string  `json:"winner"` // "enz", "zip", or "gzip"
 }
 
 // Report holds the complete benchmark report
 type Report struct {
-	Generated   time.Time          `json:"generated"`
-	GoVersion   string             `json:"go_version"`
-	Platform    string             `json:"platform"`
-	SizesKB     []int              `json:"sizes_kb"`
-	Results     []BenchmarkResult  `json:"results"`
-	Summary     ReportSummary      `json:"summary"`
+	Generated time.Time         `json:"generated"`
+	GoVersion string            `json:"go_version"`
+	Platform  string            `json:"platform"`
+	SizesKB   []int             `json:"sizes_kb"`
+	Results   []BenchmarkResult `json:"results"`
+	Summary   ReportSummary     `json:"summary"`
 }
 
 // ReportSummary provides aggregate statistics
 type ReportSummary struct {
-	TotalTests     int                `json:"total_tests"`
-	EnzWins        int                `json:"enz_wins"`
-	ZipWins        int                `json:"zip_wins"`
-	GzipWins       int                `json:"gzip_wins"`
-	AvgEnzVsZip    float64            `json:"avg_enz_vs_zip"`
-	ByCategory     map[string]CatSummary `json:"by_category"`
-	BySizeKB       map[int]SizeSummary   `json:"by_size_kb"`
+	TotalTests  int                   `json:"total_tests"`
+	EnzWins     int                   `json:"enz_wins"`
+	ZipWins     int                   `json:"zip_wins"`
+	GzipWins    int                   `json:"gzip_wins"`
+	AvgEnzVsZip float64               `json:"avg_enz_vs_zip"`
+	ByCategory  map[string]CatSummary `json:"by_category"`
+	BySizeKB    map[int]SizeSummary   `json:"by_size_kb"`
 }
 
 type CatSummary struct {
@@ -245,7 +245,7 @@ func runBenchmark(comp *compress.Compressor, ct ContentType, sizeKB int) Benchma
 
 	// Raw algorithm tests (no container overhead)
 	result.DeflateOnly = len(deflateBytes(data))
-	
+
 	// BPELATE raw
 	v := vocab.ForLanguage(vocab.LangText)
 	encoder := bpe.NewEncoder(v)

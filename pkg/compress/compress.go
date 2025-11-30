@@ -70,6 +70,14 @@ const (
 	flagUTF8       = 0x0800 // Bit 11: UTF-8 filename
 )
 
+// Unix file type constants (for st_mode)
+const (
+	unixModeTypeMask = 0170000 // S_IFMT - mask for file type
+	unixModeRegular  = 0100000 // S_IFREG - regular file
+	unixModeDir      = 0040000 // S_IFDIR - directory
+	unixModeSymlink  = 0120000 // S_IFLNK - symbolic link
+)
+
 // Extra field IDs
 const (
 	extraExtendedTS = 0x5455 // Extended timestamp
@@ -211,8 +219,8 @@ var (
 // FileInfo contains metadata about a file in the archive.
 type FileInfo struct {
 	Name     string
-	Size     int64       // uncompressed size
-	CompSize int64       // compressed size
+	Size     int64 // uncompressed size
+	CompSize int64 // compressed size
 	Method   Method
 	CRC32    uint32
 	ModTime  time.Time
@@ -226,7 +234,7 @@ type Compressor struct {
 	// Default vocabulary (for text)
 	encoder *bpe.Encoder
 	vocab   *bpe.Vocabulary
-	
+
 	// Language-specific encoders (created on demand)
 	goEncoder *bpe.Encoder
 	pyEncoder *bpe.Encoder
@@ -264,6 +272,8 @@ type archiveEntry struct {
 	modTime    time.Time
 	mode       os.FileMode
 	vocabInfo  VocabInfo
+	isSymlink  bool   // true if this is a symbolic link
+	linkTarget string // target path for symlinks
 }
 
 // NewArchive creates a new archive builder.
@@ -361,6 +371,27 @@ func (a *Archive) AddDirectory(name string, modTime time.Time, mode os.FileMode)
 	return nil
 }
 
+// AddSymlink adds a symbolic link entry to the archive.
+// The link target is stored as the file content.
+func (a *Archive) AddSymlink(name string, target string, modTime time.Time, mode os.FileMode) error {
+	targetBytes := []byte(target)
+
+	entry := archiveEntry{
+		name:       name,
+		data:       targetBytes,
+		compressed: targetBytes,
+		method:     MethodStore,
+		crc:        crc32.ChecksumIEEE(targetBytes),
+		modTime:    modTime,
+		mode:       mode | os.ModeSymlink,
+		isSymlink:  true,
+		linkTarget: target,
+	}
+
+	a.entries = append(a.entries, entry)
+	return nil
+}
+
 // Bytes returns the complete ZIP archive.
 func (a *Archive) Bytes() ([]byte, error) {
 	var buf bytes.Buffer
@@ -384,8 +415,8 @@ func (a *Archive) Bytes() ([]byte, error) {
 			extraCentral = append(extraCentral, vocabExtra...)
 		}
 
-		// Unix external attributes
-		externalAttrs := uint32(entry.mode) << 16
+		// Unix external attributes (convert Go mode to Unix st_mode)
+		externalAttrs := goModeToUnix(entry.mode) << 16
 
 		// Local file header
 		localHeaderOffset := buf.Len()
@@ -630,8 +661,8 @@ func (c *Compressor) createZIP(data []byte, name string, modTime time.Time, mode
 	extraLocal := makeExtendedTimestamp(modTime, true)
 	extraCentral := makeExtendedTimestamp(modTime, false)
 
-	// Unix external attributes: mode in upper 16 bits
-	externalAttrs := uint32(mode) << 16
+	// Unix external attributes: convert Go mode to Unix st_mode
+	externalAttrs := goModeToUnix(mode) << 16
 
 	// Build archive
 	var buf bytes.Buffer
@@ -689,8 +720,8 @@ func (c *Compressor) createZIPWithCompressedAndLang(originalData, compressed []b
 		extraCentral = append(extraCentral, vocabExtra...)
 	}
 
-	// Unix external attributes: mode in upper 16 bits
-	externalAttrs := uint32(mode) << 16
+	// Unix external attributes: convert Go mode to Unix st_mode
+	externalAttrs := goModeToUnix(mode) << 16
 
 	// Build archive
 	var buf bytes.Buffer
@@ -932,11 +963,11 @@ func ListFiles(data []byte) ([]*FileInfo, error) {
 		mode := os.FileMode(0644)
 		versionMadeBy := binary.LittleEndian.Uint16(data[offset+4 : offset+6])
 		if (versionMadeBy >> 8) == 3 { // Unix
-			mode = os.FileMode(externalAttrs >> 16)
+			mode = unixModeToGo(externalAttrs >> 16)
 		}
 
-		// Check if directory
-		if strings.HasSuffix(name, "/") {
+		// Check if directory (fallback for non-Unix archives)
+		if strings.HasSuffix(name, "/") && mode&os.ModeDir == 0 {
 			mode |= os.ModeDir
 		}
 
@@ -1378,9 +1409,13 @@ func parseUnixMode(cd []byte) (os.FileMode, bool) {
 	}
 
 	externalAttrs := binary.LittleEndian.Uint32(cd[38:42])
-	mode := os.FileMode(externalAttrs >> 16)
+	unixMode := externalAttrs >> 16
+	if unixMode == 0 {
+		return 0, false
+	}
+	mode := unixModeToGo(unixMode)
 
-	return mode, mode != 0
+	return mode, true
 }
 
 // IsValidFormat checks if data is a valid ZIP file.
@@ -1390,4 +1425,39 @@ func IsValidFormat(data []byte) bool {
 	}
 	sig := binary.LittleEndian.Uint32(data[0:4])
 	return sig == sigLocalFile
+}
+
+// goModeToUnix converts Go's os.FileMode to Unix st_mode.
+func goModeToUnix(mode os.FileMode) uint32 {
+	// Start with permission bits
+	unixMode := uint32(mode.Perm())
+
+	// Set file type
+	switch {
+	case mode&os.ModeSymlink != 0:
+		unixMode |= unixModeSymlink
+	case mode&os.ModeDir != 0:
+		unixMode |= unixModeDir
+	default:
+		unixMode |= unixModeRegular
+	}
+
+	return unixMode
+}
+
+// unixModeToGo converts Unix st_mode to Go's os.FileMode.
+func unixModeToGo(unixMode uint32) os.FileMode {
+	// Permission bits
+	mode := os.FileMode(unixMode & 0777)
+
+	// File type
+	switch unixMode & unixModeTypeMask {
+	case unixModeSymlink:
+		mode |= os.ModeSymlink
+	case unixModeDir:
+		mode |= os.ModeDir
+		// Regular file has no special mode bit in Go
+	}
+
+	return mode
 }
