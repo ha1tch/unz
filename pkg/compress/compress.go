@@ -211,8 +211,8 @@ var (
 // FileInfo contains metadata about a file in the archive.
 type FileInfo struct {
 	Name     string
-	Size     int64 // uncompressed size
-	CompSize int64 // compressed size
+	Size     int64       // uncompressed size
+	CompSize int64       // compressed size
 	Method   Method
 	CRC32    uint32
 	ModTime  time.Time
@@ -226,7 +226,7 @@ type Compressor struct {
 	// Default vocabulary (for text)
 	encoder *bpe.Encoder
 	vocab   *bpe.Vocabulary
-
+	
 	// Language-specific encoders (created on demand)
 	goEncoder *bpe.Encoder
 	pyEncoder *bpe.Encoder

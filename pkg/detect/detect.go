@@ -42,7 +42,7 @@ func (t Type) String() string {
 type CodeLang int
 
 const (
-	CodeLangUnknown CodeLang = iota
+	CodeLangUnknown    CodeLang = iota
 	CodeLangGo
 	CodeLangPython
 	CodeLangJavaScript
@@ -115,7 +115,7 @@ func (m MarkupLang) String() string {
 type NatLang int
 
 const (
-	NatLangUnknown NatLang = iota
+	NatLangUnknown    NatLang = iota
 	NatLangEnglish
 	NatLangSpanish
 	NatLangFrench
@@ -221,10 +221,10 @@ func Detect(data []byte) Profile {
 
 	// First check for structured data formats (JSON, XML, etc.)
 	profile.DataFmt = detectDataFormat(sample)
-
+	
 	// Check for markup languages
 	profile.Markup = detectMarkup(sample)
-
+	
 	// Detect natural language (for text content)
 	profile.NatLang = detectNatLang(sample)
 
@@ -941,14 +941,14 @@ func detectNatLang(data []byte) NatLang {
 
 	// Check for non-Latin scripts first (by Unicode range)
 	var hasArabic, hasChinese, hasJapanese, hasHindi, hasBengali, hasRussian bool
-
+	
 	for i := 0; i < len(data); {
 		r, size := decodeRune(data[i:])
 		if size == 0 {
 			i++
 			continue
 		}
-
+		
 		switch {
 		case r >= 0x0600 && r <= 0x06FF: // Arabic
 			hasArabic = true
@@ -988,7 +988,7 @@ func detectNatLang(data []byte) NatLang {
 
 	// For Latin scripts, use common word detection
 	lower := bytes.ToLower(data)
-
+	
 	// Spanish indicators
 	esScore := 0
 	for _, word := range [][]byte{
@@ -1132,28 +1132,28 @@ func decodeRune(data []byte) (rune, int) {
 	if len(data) == 0 {
 		return 0, 0
 	}
-
+	
 	b0 := data[0]
-
+	
 	// ASCII
 	if b0 < 0x80 {
 		return rune(b0), 1
 	}
-
+	
 	// 2-byte sequence
 	if b0 >= 0xC0 && b0 < 0xE0 && len(data) >= 2 {
 		return rune(b0&0x1F)<<6 | rune(data[1]&0x3F), 2
 	}
-
+	
 	// 3-byte sequence
 	if b0 >= 0xE0 && b0 < 0xF0 && len(data) >= 3 {
 		return rune(b0&0x0F)<<12 | rune(data[1]&0x3F)<<6 | rune(data[2]&0x3F), 3
 	}
-
+	
 	// 4-byte sequence
 	if b0 >= 0xF0 && b0 < 0xF8 && len(data) >= 4 {
 		return rune(b0&0x07)<<18 | rune(data[1]&0x3F)<<12 | rune(data[2]&0x3F)<<6 | rune(data[3]&0x3F), 4
 	}
-
+	
 	return 0, 1 // Invalid, skip one byte
 }
