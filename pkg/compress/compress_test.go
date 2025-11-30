@@ -2,6 +2,7 @@ package compress
 
 import (
 	"bytes"
+	"os"
 	"testing"
 	"time"
 
@@ -242,7 +243,7 @@ func TestCompressSpecialNames(t *testing.T) {
 		"UPPERCASE.TXT",
 		"MixedCase.Txt",
 		"файл.txt", // Cyrillic
-		"文件.txt",  // Chinese
+		"文件.txt",   // Chinese
 	}
 
 	for _, name := range names {
@@ -275,8 +276,8 @@ func TestVarints(t *testing.T) {
 		{256},
 		{1000},
 		{0, 128, 256, 1000, 10000},
-		{16383},  // max 2-byte varint
-		{16384},  // min 3-byte varint
+		{16383}, // max 2-byte varint
+		{16384}, // min 3-byte varint
 	}
 
 	for _, values := range testCases {
@@ -399,7 +400,7 @@ func TestVocabInfo(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			extra := makeVocabInfo(tc.info)
-			
+
 			// Parse it back
 			parsed, ok := parseVocabInfo(extra)
 			if !ok {
@@ -521,5 +522,383 @@ func TestTypeStrings(t *testing.T) {
 		if got := tc.m.String(); got != tc.want {
 			t.Errorf("MarkupLang(%d).String(): got %q, want %q", tc.m, got, tc.want)
 		}
+	}
+}
+
+// === Multi-file Archive Tests ===
+
+func TestArchiveMultipleFiles(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	// Add multiple files
+	files := []struct {
+		name    string
+		content string
+	}{
+		{"file1.txt", "Hello, World!"},
+		{"file2.txt", "Another file with some content."},
+		{"src/main.go", "package main\n\nfunc main() {}\n"},
+	}
+
+	for _, f := range files {
+		err := archive.Add([]byte(f.content), f.name, time.Now(), 0644)
+		if err != nil {
+			t.Fatalf("Add(%s): %v", f.name, err)
+		}
+	}
+
+	// Build archive
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	// Verify it's a valid ZIP
+	if !IsValidFormat(data) {
+		t.Fatal("Archive is not valid ZIP format")
+	}
+
+	// List files
+	infos, err := ListFiles(data)
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+
+	if len(infos) != len(files) {
+		t.Errorf("ListFiles: got %d files, want %d", len(infos), len(files))
+	}
+
+	// Verify each file
+	for i, f := range files {
+		if infos[i].Name != f.name {
+			t.Errorf("File %d: name = %q, want %q", i, infos[i].Name, f.name)
+		}
+		if infos[i].Size != int64(len(f.content)) {
+			t.Errorf("File %d: size = %d, want %d", i, infos[i].Size, len(f.content))
+		}
+	}
+
+	// Extract each file
+	for i, f := range files {
+		content, err := comp.DecompressFile(data, infos[i])
+		if err != nil {
+			t.Errorf("DecompressFile(%s): %v", f.name, err)
+			continue
+		}
+		if string(content) != f.content {
+			t.Errorf("DecompressFile(%s): content = %q, want %q", f.name, string(content), f.content)
+		}
+	}
+}
+
+func TestArchiveWithDirectories(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	// Add directory
+	err := archive.AddDirectory("mydir", time.Now(), 0755)
+	if err != nil {
+		t.Fatalf("AddDirectory: %v", err)
+	}
+
+	// Add file in directory
+	err = archive.Add([]byte("file content"), "mydir/file.txt", time.Now(), 0644)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Build archive
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	// List files
+	infos, err := ListFiles(data)
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+
+	if len(infos) != 2 {
+		t.Fatalf("ListFiles: got %d entries, want 2", len(infos))
+	}
+
+	// First should be directory
+	if infos[0].Name != "mydir/" {
+		t.Errorf("Directory name = %q, want %q", infos[0].Name, "mydir/")
+	}
+	if infos[0].Size != 0 {
+		t.Errorf("Directory size = %d, want 0", infos[0].Size)
+	}
+
+	// Second should be file
+	if infos[1].Name != "mydir/file.txt" {
+		t.Errorf("File name = %q, want %q", infos[1].Name, "mydir/file.txt")
+	}
+}
+
+func TestArchiveStore(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	content := []byte("This content should be stored without compression")
+
+	err := archive.AddStore(content, "stored.bin", time.Now(), 0644)
+	if err != nil {
+		t.Fatalf("AddStore: %v", err)
+	}
+
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	infos, err := ListFiles(data)
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+
+	if len(infos) != 1 {
+		t.Fatalf("ListFiles: got %d files, want 1", len(infos))
+	}
+
+	// Method should be Stored
+	if infos[0].Method != MethodStore {
+		t.Errorf("Method = %v, want Stored", infos[0].Method)
+	}
+
+	// Compressed size should equal original size
+	if infos[0].CompSize != infos[0].Size {
+		t.Errorf("CompSize = %d, Size = %d, want equal", infos[0].CompSize, infos[0].Size)
+	}
+
+	// Extract and verify
+	extracted, err := comp.DecompressFile(data, infos[0])
+	if err != nil {
+		t.Fatalf("DecompressFile: %v", err)
+	}
+	if !bytes.Equal(extracted, content) {
+		t.Errorf("Extracted content doesn't match original")
+	}
+}
+
+func TestDecompressAll(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	files := map[string]string{
+		"a.txt":     "Content of A",
+		"b.txt":     "Content of B",
+		"dir/c.txt": "Content of C",
+	}
+
+	// Add directory first
+	archive.AddDirectory("dir", time.Now(), 0755)
+
+	for name, content := range files {
+		err := archive.Add([]byte(content), name, time.Now(), 0644)
+		if err != nil {
+			t.Fatalf("Add(%s): %v", name, err)
+		}
+	}
+
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	// DecompressAll
+	extracted, err := comp.DecompressAll(data)
+	if err != nil {
+		t.Fatalf("DecompressAll(): %v", err)
+	}
+
+	// Should have 3 files (directory not included)
+	if len(extracted) != len(files) {
+		t.Errorf("DecompressAll: got %d files, want %d", len(extracted), len(files))
+	}
+
+	// Verify each file
+	for name, want := range files {
+		got, ok := extracted[name]
+		if !ok {
+			t.Errorf("DecompressAll: missing file %q", name)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("DecompressAll(%s): got %q, want %q", name, string(got), want)
+		}
+	}
+}
+
+func TestListFilesEmpty(t *testing.T) {
+	// Test with invalid/empty data
+	_, err := ListFiles(nil)
+	if err != ErrTooShort {
+		t.Errorf("ListFiles(nil): got %v, want ErrTooShort", err)
+	}
+
+	_, err = ListFiles([]byte{1, 2, 3})
+	if err != ErrTooShort {
+		t.Errorf("ListFiles(short): got %v, want ErrTooShort", err)
+	}
+}
+
+func TestArchiveEmpty(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	// Build empty archive
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	// Should still be valid ZIP
+	if !IsValidFormat(data) {
+		// Empty archive might not have local file header
+		// but should at least have EOCD
+		if len(data) < 22 {
+			t.Error("Empty archive too short")
+		}
+	}
+
+	// ListFiles should return empty
+	infos, err := ListFiles(data)
+	if err != nil && len(data) >= 22 {
+		// Only error if we have enough data for EOCD
+		t.Logf("ListFiles on empty archive: %v (may be expected)", err)
+	}
+	if len(infos) != 0 {
+		t.Errorf("ListFiles on empty: got %d files, want 0", len(infos))
+	}
+}
+
+func TestArchiveMixedMethods(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	// Add files that will use different compression methods
+	files := []struct {
+		name    string
+		content []byte
+		store   bool
+	}{
+		{"code.go", []byte("package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n"), false},
+		{"binary.bin", []byte{0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD}, true},
+		{"text.txt", []byte("The quick brown fox jumps over the lazy dog."), false},
+	}
+
+	for _, f := range files {
+		var err error
+		if f.store {
+			err = archive.AddStore(f.content, f.name, time.Now(), 0644)
+		} else {
+			err = archive.Add(f.content, f.name, time.Now(), 0644)
+		}
+		if err != nil {
+			t.Fatalf("Add(%s): %v", f.name, err)
+		}
+	}
+
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	// Extract all and verify
+	extracted, err := comp.DecompressAll(data)
+	if err != nil {
+		t.Fatalf("DecompressAll(): %v", err)
+	}
+
+	for _, f := range files {
+		got, ok := extracted[f.name]
+		if !ok {
+			t.Errorf("Missing file: %s", f.name)
+			continue
+		}
+		if !bytes.Equal(got, f.content) {
+			t.Errorf("Content mismatch for %s", f.name)
+		}
+	}
+}
+
+func TestArchivePreservesMetadata(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	modTime := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+	mode := os.FileMode(0755)
+
+	err := archive.Add([]byte("test content"), "test.sh", modTime, mode)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	infos, err := ListFiles(data)
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+
+	if len(infos) != 1 {
+		t.Fatalf("Expected 1 file, got %d", len(infos))
+	}
+
+	info := infos[0]
+
+	// Check mode (upper bits)
+	if info.Mode&0777 != mode&0777 {
+		t.Errorf("Mode: got %o, want %o", info.Mode&0777, mode&0777)
+	}
+
+	// Check modification time (DOS time has 2-second resolution)
+	timeDiff := info.ModTime.Sub(modTime)
+	if timeDiff < -2*time.Second || timeDiff > 2*time.Second {
+		t.Errorf("ModTime: got %v, want ~%v", info.ModTime, modTime)
+	}
+}
+
+func TestDecompressFileByOffset(t *testing.T) {
+	vocab := testVocab()
+	comp := New(vocab)
+	archive := NewArchive(comp)
+
+	// Add files
+	archive.Add([]byte("first file"), "first.txt", time.Now(), 0644)
+	archive.Add([]byte("second file"), "second.txt", time.Now(), 0644)
+	archive.Add([]byte("third file"), "third.txt", time.Now(), 0644)
+
+	data, err := archive.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+
+	infos, err := ListFiles(data)
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+
+	// Extract second file specifically
+	content, err := comp.DecompressFile(data, infos[1])
+	if err != nil {
+		t.Fatalf("DecompressFile: %v", err)
+	}
+
+	if string(content) != "second file" {
+		t.Errorf("Got %q, want %q", string(content), "second file")
 	}
 }

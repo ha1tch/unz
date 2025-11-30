@@ -22,6 +22,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ha1tch/unz/pkg/ans"
@@ -210,8 +211,8 @@ var (
 // FileInfo contains metadata about a file in the archive.
 type FileInfo struct {
 	Name     string
-	Size     int64       // uncompressed size
-	CompSize int64       // compressed size
+	Size     int64 // uncompressed size
+	CompSize int64 // compressed size
 	Method   Method
 	CRC32    uint32
 	ModTime  time.Time
@@ -225,7 +226,7 @@ type Compressor struct {
 	// Default vocabulary (for text)
 	encoder *bpe.Encoder
 	vocab   *bpe.Vocabulary
-	
+
 	// Language-specific encoders (created on demand)
 	goEncoder *bpe.Encoder
 	pyEncoder *bpe.Encoder
@@ -246,6 +247,196 @@ func NewWithEncoder(enc *bpe.Encoder) *Compressor {
 		encoder: enc,
 		vocab:   enc.Vocabulary(),
 	}
+}
+
+// Archive builds a multi-file ZIP archive.
+type Archive struct {
+	compressor *Compressor
+	entries    []archiveEntry
+}
+
+type archiveEntry struct {
+	name       string
+	data       []byte
+	compressed []byte
+	method     Method
+	crc        uint32
+	modTime    time.Time
+	mode       os.FileMode
+	vocabInfo  VocabInfo
+}
+
+// NewArchive creates a new archive builder.
+func NewArchive(c *Compressor) *Archive {
+	return &Archive{compressor: c}
+}
+
+// Add adds a file to the archive with automatic method selection.
+func (a *Archive) Add(data []byte, name string, modTime time.Time, mode os.FileMode) error {
+	if len(data) > 0xFFFFFFFF {
+		return ErrFileTooLarge
+	}
+
+	entry := archiveEntry{
+		name:    name,
+		data:    data,
+		crc:     crc32.ChecksumIEEE(data),
+		modTime: modTime,
+		mode:    mode,
+	}
+
+	if len(data) == 0 {
+		entry.method = MethodStore
+		entry.compressed = data
+	} else {
+		profile := detect.Detect(data)
+
+		switch profile.Type {
+		case detect.TypeText:
+			compressed, method, vocab := a.compressor.compressTextBest(data)
+			entry.compressed = compressed
+			entry.method = method
+			entry.vocabInfo = vocab
+		case detect.TypeCode:
+			compressed, method, vocab := a.compressor.compressCodeBest(data, profile.Language)
+			entry.compressed = compressed
+			entry.method = method
+			entry.vocabInfo = vocab
+		case detect.TypeRandom:
+			entry.method = MethodStore
+			entry.compressed = data
+		default:
+			compressed, _ := a.compressor.compressDEFLATE(data)
+			entry.method = MethodDEFLATE
+			entry.compressed = compressed
+		}
+	}
+
+	if len(entry.compressed) > 0xFFFFFFFF {
+		return ErrFileTooLarge
+	}
+
+	a.entries = append(a.entries, entry)
+	return nil
+}
+
+// AddStore adds a file to the archive without compression (store only).
+func (a *Archive) AddStore(data []byte, name string, modTime time.Time, mode os.FileMode) error {
+	if len(data) > 0xFFFFFFFF {
+		return ErrFileTooLarge
+	}
+
+	entry := archiveEntry{
+		name:       name,
+		data:       data,
+		compressed: data,
+		method:     MethodStore,
+		crc:        crc32.ChecksumIEEE(data),
+		modTime:    modTime,
+		mode:       mode,
+	}
+
+	a.entries = append(a.entries, entry)
+	return nil
+}
+
+// AddDirectory adds a directory entry to the archive.
+func (a *Archive) AddDirectory(name string, modTime time.Time, mode os.FileMode) error {
+	// Ensure directory name ends with /
+	if !strings.HasSuffix(name, "/") {
+		name += "/"
+	}
+
+	entry := archiveEntry{
+		name:       name,
+		data:       nil,
+		compressed: nil,
+		method:     MethodStore,
+		crc:        0,
+		modTime:    modTime,
+		mode:       mode | os.ModeDir,
+	}
+
+	a.entries = append(a.entries, entry)
+	return nil
+}
+
+// Bytes returns the complete ZIP archive.
+func (a *Archive) Bytes() ([]byte, error) {
+	var buf bytes.Buffer
+	var centralDir bytes.Buffer
+
+	for _, entry := range a.entries {
+		dosTime, dosDate := timeToDOS(entry.modTime)
+		flags := uint16(0)
+		if hasNonASCII(entry.name) {
+			flags |= flagUTF8
+		}
+
+		// Build extra fields
+		extraLocal := makeExtendedTimestamp(entry.modTime, true)
+		extraCentral := makeExtendedTimestamp(entry.modTime, false)
+
+		// Add vocabulary info for BPELATE
+		if entry.method == MethodBPELATE {
+			vocabExtra := makeVocabInfo(entry.vocabInfo)
+			extraLocal = append(extraLocal, vocabExtra...)
+			extraCentral = append(extraCentral, vocabExtra...)
+		}
+
+		// Unix external attributes
+		externalAttrs := uint32(entry.mode) << 16
+
+		// Local file header
+		localHeaderOffset := buf.Len()
+		writeLocalHeader(&buf, entry.name, entry.method, flags, dosTime, dosDate, entry.crc,
+			uint32(len(entry.compressed)), uint32(len(entry.data)), extraLocal)
+
+		// File data
+		buf.Write(entry.compressed)
+
+		// Central directory entry
+		writeCentralDir(&centralDir, entry.name, entry.method, flags, dosTime, dosDate, entry.crc,
+			uint32(len(entry.compressed)), uint32(len(entry.data)), uint32(localHeaderOffset),
+			externalAttrs, extraCentral)
+	}
+
+	// Append central directory
+	centralDirOffset := buf.Len()
+	buf.Write(centralDir.Bytes())
+	centralDirSize := buf.Len() - centralDirOffset
+
+	// End of central directory
+	writeEndCentralDir(&buf, len(a.entries), uint32(centralDirSize), uint32(centralDirOffset))
+
+	return buf.Bytes(), nil
+}
+
+// compressTextBest compresses text and returns best result with method and vocab info.
+func (c *Compressor) compressTextBest(data []byte) ([]byte, Method, VocabInfo) {
+	deflateData, _ := c.compressDEFLATE(data)
+	bpelateData, _ := c.compressBPELATE(data)
+
+	vocab := VocabInfo{NatLang: NatLangEnglish}
+
+	if len(bpelateData) < len(deflateData) {
+		return bpelateData, MethodBPELATE, vocab
+	}
+	return deflateData, MethodDEFLATE, vocab
+}
+
+// compressCodeBest compresses code and returns best result with method and vocab info.
+func (c *Compressor) compressCodeBest(data []byte, lang detect.CodeLang) ([]byte, Method, VocabInfo) {
+	encoder := c.getEncoderForLang(lang)
+	vocabInfo := makeVocabInfoFromDetect(lang)
+
+	deflateData, _ := c.compressDEFLATE(data)
+	bpelateData, _ := c.compressBPELATEWith(data, encoder)
+
+	if len(bpelateData) < len(deflateData) {
+		return bpelateData, MethodBPELATE, vocabInfo
+	}
+	return deflateData, MethodDEFLATE, vocabInfo
 }
 
 // CompressFile creates a ZIP archive containing one file.
@@ -662,6 +853,179 @@ func (c *Compressor) Decompress(data []byte) ([]byte, error) {
 	default:
 		return nil, ErrUnsupported
 	}
+}
+
+// ListFiles returns metadata for all files in a ZIP archive.
+func ListFiles(data []byte) ([]*FileInfo, error) {
+	if len(data) < 22 {
+		return nil, ErrTooShort
+	}
+
+	// Find end of central directory
+	eocdOffset := -1
+	for i := len(data) - 22; i >= 0 && i > len(data)-65557; i-- {
+		if binary.LittleEndian.Uint32(data[i:i+4]) == sigEndCentralD {
+			eocdOffset = i
+			break
+		}
+	}
+	if eocdOffset < 0 {
+		return nil, ErrInvalidFormat
+	}
+
+	// Parse EOCD
+	numEntries := int(binary.LittleEndian.Uint16(data[eocdOffset+10 : eocdOffset+12]))
+	centralDirOffset := int(binary.LittleEndian.Uint32(data[eocdOffset+16 : eocdOffset+20]))
+
+	if centralDirOffset >= len(data) {
+		return nil, ErrCorrupted
+	}
+
+	// Parse central directory entries
+	var files []*FileInfo
+	offset := centralDirOffset
+
+	for i := 0; i < numEntries && offset < eocdOffset; i++ {
+		if offset+46 > len(data) {
+			break
+		}
+
+		sig := binary.LittleEndian.Uint32(data[offset : offset+4])
+		if sig != sigCentralDir {
+			break
+		}
+
+		method := Method(binary.LittleEndian.Uint16(data[offset+10 : offset+12]))
+		dosTime := binary.LittleEndian.Uint16(data[offset+12 : offset+14])
+		dosDate := binary.LittleEndian.Uint16(data[offset+14 : offset+16])
+		crc := binary.LittleEndian.Uint32(data[offset+16 : offset+20])
+		compSize := binary.LittleEndian.Uint32(data[offset+20 : offset+24])
+		uncompSize := binary.LittleEndian.Uint32(data[offset+24 : offset+28])
+		nameLen := int(binary.LittleEndian.Uint16(data[offset+28 : offset+30]))
+		extraLen := int(binary.LittleEndian.Uint16(data[offset+30 : offset+32]))
+		commentLen := int(binary.LittleEndian.Uint16(data[offset+32 : offset+34]))
+		externalAttrs := binary.LittleEndian.Uint32(data[offset+38 : offset+42])
+		localOffset := binary.LittleEndian.Uint32(data[offset+42 : offset+46])
+
+		if offset+46+nameLen+extraLen+commentLen > len(data) {
+			break
+		}
+
+		name := string(data[offset+46 : offset+46+nameLen])
+
+		// Parse modification time
+		modTime := dosToTime(dosTime, dosDate)
+		vocab := VocabInfo{}
+
+		// Parse extra fields
+		if extraLen > 0 {
+			extra := data[offset+46+nameLen : offset+46+nameLen+extraLen]
+			if unixTime, ok := parseExtendedTimestamp(extra); ok {
+				modTime = unixTime
+			}
+			if parsedVocab, ok := parseVocabInfo(extra); ok {
+				vocab = parsedVocab
+			}
+		}
+
+		// Unix mode from external attributes
+		mode := os.FileMode(0644)
+		versionMadeBy := binary.LittleEndian.Uint16(data[offset+4 : offset+6])
+		if (versionMadeBy >> 8) == 3 { // Unix
+			mode = os.FileMode(externalAttrs >> 16)
+		}
+
+		// Check if directory
+		if strings.HasSuffix(name, "/") {
+			mode |= os.ModeDir
+		}
+
+		files = append(files, &FileInfo{
+			Name:     name,
+			Size:     int64(uncompSize),
+			CompSize: int64(compSize),
+			Method:   method,
+			CRC32:    crc,
+			ModTime:  modTime,
+			Mode:     mode,
+			Offset:   int64(localOffset),
+			Vocab:    vocab,
+		})
+
+		offset += 46 + nameLen + extraLen + commentLen
+	}
+
+	return files, nil
+}
+
+// DecompressFile extracts a specific file from a ZIP archive by its FileInfo.
+func (c *Compressor) DecompressFile(data []byte, info *FileInfo) ([]byte, error) {
+	offset := int(info.Offset)
+
+	if offset+30 > len(data) {
+		return nil, ErrCorrupted
+	}
+
+	// Verify local header signature
+	sig := binary.LittleEndian.Uint32(data[offset : offset+4])
+	if sig != sigLocalFile {
+		return nil, ErrCorrupted
+	}
+
+	// Get local header name and extra lengths (may differ from central dir)
+	nameLen := int(binary.LittleEndian.Uint16(data[offset+26 : offset+28]))
+	extraLen := int(binary.LittleEndian.Uint16(data[offset+28 : offset+30]))
+
+	dataOffset := offset + 30 + nameLen + extraLen
+
+	if dataOffset+int(info.CompSize) > len(data) {
+		return nil, ErrCorrupted
+	}
+
+	// Directory entries have no data
+	if strings.HasSuffix(info.Name, "/") || info.Size == 0 && info.CompSize == 0 {
+		return nil, nil
+	}
+
+	compressed := data[dataOffset : dataOffset+int(info.CompSize)]
+
+	switch info.Method {
+	case MethodUNZLATE:
+		return c.decompressUNZLATE(compressed)
+	case MethodBPELATE:
+		return c.decompressBPELATEWithVocab(compressed, info.Vocab)
+	case MethodDEFLATE:
+		return c.decompressDEFLATE(compressed)
+	case MethodStore:
+		return compressed, nil
+	default:
+		return nil, ErrUnsupported
+	}
+}
+
+// DecompressAll extracts all files from a ZIP archive.
+// Returns a map of filename to file contents.
+func (c *Compressor) DecompressAll(data []byte) (map[string][]byte, error) {
+	files, err := ListFiles(data)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string][]byte)
+	for _, info := range files {
+		// Skip directories
+		if strings.HasSuffix(info.Name, "/") {
+			continue
+		}
+
+		content, err := c.DecompressFile(data, info)
+		if err != nil {
+			return nil, err
+		}
+		result[info.Name] = content
+	}
+
+	return result, nil
 }
 
 // compressUNZLATE compresses using BPE + ANS.

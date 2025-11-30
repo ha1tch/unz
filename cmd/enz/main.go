@@ -2,7 +2,7 @@
 //
 // Usage matches zip(1):
 //
-//	enz [-0|-9] [-q] [-v] [-m] [-j] archive.unz file...
+//	enz [-0|-9] [-r] [-q] [-v] [-m] [-j] archive.zip file...
 package main
 
 import (
@@ -20,12 +20,20 @@ import (
 var (
 	level0    = flag.Bool("0", false, "store only (no compression)")
 	level9    = flag.Bool("9", false, "best compression (default)")
+	recursive = flag.Bool("r", false, "recurse into directories")
 	quiet     = flag.Bool("q", false, "quiet operation")
 	verbose   = flag.Bool("v", false, "verbose operation")
 	move      = flag.Bool("m", false, "move into archive (delete input files)")
 	junkPaths = flag.Bool("j", false, "junk (don't record) directory names")
 	help      = flag.Bool("h", false, "display this help")
 )
+
+type fileEntry struct {
+	path  string // path on disk
+	name  string // name in archive
+	info  os.FileInfo
+	isDir bool
+}
 
 func main() {
 	flag.Usage = usage
@@ -47,99 +55,178 @@ func main() {
 		archivePath += ".zip"
 	}
 
-	inputPath := flag.Arg(1)
-
-	// Check input exists
-	inputInfo, err := os.Stat(inputPath)
-	if err != nil {
-		fatal("cannot access '%s': %v", inputPath, err)
-	}
-	if inputInfo.IsDir() {
-		fatal("'%s' is a directory (directories not yet supported)", inputPath)
-	}
-
-	// Read input
-	input, err := os.ReadFile(inputPath)
-	if err != nil {
-		fatal("cannot read '%s': %v", inputPath, err)
+	// Collect all files to add
+	var entries []fileEntry
+	for i := 1; i < flag.NArg(); i++ {
+		inputPath := flag.Arg(i)
+		collected, err := collectFiles(inputPath)
+		if err != nil {
+			fatal("cannot access '%s': %v", inputPath, err)
+		}
+		entries = append(entries, collected...)
 	}
 
-	// Get the name to store
-	storedName := inputPath
-	if *junkPaths {
-		storedName = filepath.Base(inputPath)
+	if len(entries) == 0 {
+		fatal("no files to add")
 	}
 
-	// Use shared vocabulary
-	if !*quiet {
-		fmt.Fprintf(os.Stderr, "  adding: %s", storedName)
-	}
-
+	// Create archive
 	comp := compress.New(vocab.Default())
+	archive := compress.NewArchive(comp)
 
-	// Compress with file's actual permissions
+	var totalIn, totalOut int64
 	start := time.Now()
-	var output []byte
-	mode := inputInfo.Mode()
 
-	if *level0 {
-		output, err = comp.CompressFileAsWithMode(input, storedName, inputInfo.ModTime(), mode, compress.MethodStore)
-	} else {
-		output, err = comp.CompressFileWithMode(input, storedName, inputInfo.ModTime(), mode)
-	}
+	for _, entry := range entries {
+		if entry.isDir {
+			// Add directory entry
+			if !*quiet {
+				fmt.Fprintf(os.Stderr, "  adding: %s/\n", entry.name)
+			}
+			archive.AddDirectory(entry.name, entry.info.ModTime(), entry.info.Mode())
+			continue
+		}
 
-	if err != nil {
-		fatal("compression failed: %v", err)
-	}
-	elapsed := time.Since(start)
+		// Read file
+		data, err := os.ReadFile(entry.path)
+		if err != nil {
+			fatal("cannot read '%s': %v", entry.path, err)
+		}
 
-	// Get compression info
-	info, _ := compress.GetFileInfo(output)
-	ratio := 100 - (float64(info.CompSize) * 100 / float64(info.Size))
-	if ratio < 0 {
-		ratio = 0
-	}
+		if !*quiet {
+			fmt.Fprintf(os.Stderr, "  adding: %s", entry.name)
+		}
 
-	if !*quiet {
-		methodStr := strings.ToLower(info.Method.String())
-		if methodStr == "stored" {
-			fmt.Fprintf(os.Stderr, " (stored 0%%)\n")
+		// Add to archive
+		mode := entry.info.Mode()
+		if *level0 {
+			err = archive.AddStore(data, entry.name, entry.info.ModTime(), mode)
 		} else {
-			fmt.Fprintf(os.Stderr, " (%s %.0f%%)\n", methodStr, ratio)
+			err = archive.Add(data, entry.name, entry.info.ModTime(), mode)
+		}
+
+		if err != nil {
+			fatal("compression failed for '%s': %v", entry.path, err)
+		}
+
+		totalIn += int64(len(data))
+
+		if !*quiet {
+			fmt.Fprintf(os.Stderr, "\n")
 		}
 	}
 
-	// Write output
+	// Write archive
+	output, err := archive.Bytes()
+	if err != nil {
+		fatal("cannot create archive: %v", err)
+	}
+	totalOut = int64(len(output))
+
 	if err := os.WriteFile(archivePath, output, 0644); err != nil {
 		fatal("cannot write '%s': %v", archivePath, err)
 	}
 
-	// Verbose stats
+	elapsed := time.Since(start)
+
+	// Summary
 	if *verbose {
-		fmt.Fprintf(os.Stderr, "  %d bytes -> %d bytes (%.1f%%) in %v\n",
-			len(input), len(output), float64(len(output))*100/float64(len(input)),
-			elapsed.Round(time.Millisecond))
+		ratio := float64(0)
+		if totalIn > 0 {
+			ratio = 100 - (float64(totalOut) * 100 / float64(totalIn))
+		}
+		fmt.Fprintf(os.Stderr, "total %d bytes -> %d bytes (%.1f%%) in %v\n",
+			totalIn, totalOut, ratio, elapsed.Round(time.Millisecond))
 	}
 
-	// Delete input if -m
+	// Delete inputs if -m
 	if *move {
-		os.Remove(inputPath)
+		for _, entry := range entries {
+			if !entry.isDir {
+				os.Remove(entry.path)
+			}
+		}
+		// Remove directories in reverse order (deepest first)
+		for i := len(entries) - 1; i >= 0; i-- {
+			if entries[i].isDir {
+				os.Remove(entries[i].path)
+			}
+		}
 	}
 }
 
-func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: enz [-0|-9] [-qvmj] archive[.zip] file
+// collectFiles collects files from a path, recursing into directories if -r is set.
+func collectFiles(path string) ([]fileEntry, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
 
-Compress file into ZIP archive using adaptive BPE/DEFLATE compression.
+	var entries []fileEntry
+
+	if info.IsDir() {
+		if !*recursive {
+			return nil, fmt.Errorf("'%s' is a directory (use -r to recurse)", path)
+		}
+
+		// Walk directory
+		err := filepath.Walk(path, func(p string, fi os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			// Get archive name
+			name := p
+			if *junkPaths {
+				name = filepath.Base(p)
+			}
+			// Normalize path separators
+			name = filepath.ToSlash(name)
+
+			entries = append(entries, fileEntry{
+				path:  p,
+				name:  name,
+				info:  fi,
+				isDir: fi.IsDir(),
+			})
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Single file
+		name := path
+		if *junkPaths {
+			name = filepath.Base(path)
+		}
+		name = filepath.ToSlash(name)
+
+		entries = append(entries, fileEntry{
+			path:  path,
+			name:  name,
+			info:  info,
+			isDir: false,
+		})
+	}
+
+	return entries, nil
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `Usage: enz [-0|-9] [-r] [-qvmj] archive[.zip] file...
+
+Compress files into ZIP archive using adaptive BPE/DEFLATE compression.
 Output is standard PKZIP format compatible with unzip, WinZip, etc.
 
 Options:
   -0        store only (no compression)
   -9        best compression (default)
+  -r        recurse into directories
   -q        quiet operation
   -v        verbose operation  
-  -m        move into archive (delete input file after compression)
-  -j        junk directory names (store only the file name)
+  -m        move into archive (delete input files after compression)
+  -j        junk directory names (store only file names)
   -h        display this help
 
 Compression methods:
@@ -151,9 +238,11 @@ Compression methods:
 The compressor automatically selects the best method for each file.
 
 Examples:
-  enz archive document.txt       Compress document.txt into archive.zip
-  enz -0 backup.zip data.bin     Store without compression
-  enz -v -m docs.zip readme.txt  Compress with verbose output, delete original
+  enz archive.zip file.txt          Compress single file
+  enz archive.zip *.go              Compress multiple files
+  enz -r project.zip src/           Compress directory recursively
+  enz -0 backup.zip data.bin        Store without compression
+  enz -v -m docs.zip readme.txt     Verbose, delete original after
 
 `)
 }

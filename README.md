@@ -6,8 +6,6 @@ ZIP-compatible compression with adaptive BPE methods.
 
 **unz** creates standard PKZIP format files. It adds two proprietary methods optimized for source code:
 
-
-
 | Method | Code | Pipeline | Best for |
 |--------|------|----------|----------|
 | Stored | 0 | None | Incompressible data |
@@ -76,14 +74,29 @@ Or build locally:
 ## Usage
 
 ```bash
-# Compress (auto-selects best method)
+# Compress single file
 enz archive.zip file.go
 
-# Extract
+# Compress multiple files
+enz archive.zip *.go README.md
+
+# Compress directory recursively
+enz -r project.zip src/
+
+# Extract all files
 unz archive.zip
 
-# List with details
+# Extract to specific directory
+unz -d /tmp archive.zip
+
+# List contents
+unz -l archive.zip
+
+# List with details (method, size, CRC)
 unz -v archive.zip
+
+# Test archive integrity
+unz -t archive.zip
 ```
 
 ## Auto-Selection Logic

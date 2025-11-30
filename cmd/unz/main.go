@@ -1,8 +1,8 @@
-// Command unz decompresses .unz files.
+// Command unz decompresses ZIP files.
 //
 // Usage matches unzip(1):
 //
-//	unz [-ltvqonp] [-d dir] archive.unz [file...]
+//	unz [-ltvqonp] [-d dir] archive.zip [file...]
 package main
 
 import (
@@ -54,186 +54,253 @@ func main() {
 
 	// Validate format
 	if !compress.IsValidFormat(data) {
-		fatal("'%s' is not a valid .unz archive", archivePath)
+		fatal("'%s' is not a valid ZIP archive", archivePath)
 	}
 
-	// Get file info
-	info, err := compress.GetFileInfo(data)
+	// Get all files in archive
+	files, err := compress.ListFiles(data)
 	if err != nil {
 		fatal("cannot read archive: %v", err)
 	}
 
+	// Collect patterns to extract (if specified)
+	patterns := flag.Args()[1:]
+
 	// List mode
 	if *list || *listVerbose {
-		printListing(archivePath, info, *listVerbose)
+		printListing(archivePath, files, *listVerbose)
 		return
 	}
 
 	// Test mode
 	if *test {
-		testArchive(archivePath, data, info)
+		testArchive(archivePath, data, files)
 		return
 	}
 
 	// Extract
-	extractFile(archivePath, data, info)
+	extractFiles(archivePath, data, files, patterns)
 }
 
-func printListing(archivePath string, info *compress.FileInfo, verbose bool) {
+func printListing(archivePath string, files []*compress.FileInfo, verbose bool) {
 	fmt.Printf("Archive:  %s\n", archivePath)
+
+	var totalSize, totalComp int64
 
 	if verbose {
 		// Verbose format matching unzip -v
 		fmt.Println(" Length   Method     Size  Cmpr    Date    Time   CRC-32   Name")
 		fmt.Println("--------  ------  -------- ---- ---------- ----- --------  ----")
 
-		comprRatio := 0
-		if info.Size > 0 {
-			comprRatio = 100 - int(info.CompSize*100/info.Size)
-			if comprRatio < 0 {
-				comprRatio = 0
+		for _, info := range files {
+			comprRatio := 0
+			if info.Size > 0 {
+				comprRatio = 100 - int(info.CompSize*100/info.Size)
+				if comprRatio < 0 {
+					comprRatio = 0
+				}
 			}
+
+			dateStr := info.ModTime.Format("2006-01-02")
+			timeStr := info.ModTime.Format("15:04")
+			if info.ModTime.IsZero() {
+				dateStr = "----------"
+				timeStr = "-----"
+			}
+
+			fmt.Printf("%8d  %-6s  %8d %3d%% %s %s %08x  %s\n",
+				info.Size,
+				info.Method.String(),
+				info.CompSize,
+				comprRatio,
+				dateStr,
+				timeStr,
+				info.CRC32,
+				info.Name)
+
+			totalSize += info.Size
+			totalComp += info.CompSize
 		}
 
-		dateStr := info.ModTime.Format("2006-01-02")
-		timeStr := info.ModTime.Format("15:04")
-		if info.ModTime.IsZero() {
-			dateStr = "----------"
-			timeStr = "-----"
+		totalRatio := 0
+		if totalSize > 0 {
+			totalRatio = 100 - int(totalComp*100/totalSize)
 		}
-
-		fmt.Printf("%8d  %-6s  %8d %3d%% %s %s %08x  %s\n",
-			info.Size,
-			info.Method.String(),
-			info.CompSize,
-			comprRatio,
-			dateStr,
-			timeStr,
-			info.CRC32,
-			info.Name)
-
 		fmt.Println("--------          -------- ----                            -------")
-		fmt.Printf("%8d          %8d %3d%%                            1 file\n",
-			info.Size, info.CompSize, comprRatio)
+		fmt.Printf("%8d          %8d %3d%%                            %d file%s\n",
+			totalSize, totalComp, totalRatio, len(files), plural(len(files)))
 	} else {
 		// Short format matching unzip -l
 		fmt.Println("  Length      Date    Time    Name")
 		fmt.Println("---------  ---------- -----   ----")
 
-		dateStr := info.ModTime.Format("2006-01-02")
-		timeStr := info.ModTime.Format("15:04")
-		if info.ModTime.IsZero() {
-			dateStr = "----------"
-			timeStr = "-----"
+		for _, info := range files {
+			dateStr := info.ModTime.Format("2006-01-02")
+			timeStr := info.ModTime.Format("15:04")
+			if info.ModTime.IsZero() {
+				dateStr = "----------"
+				timeStr = "-----"
+			}
+
+			fmt.Printf("%9d  %s %s   %s\n",
+				info.Size,
+				dateStr,
+				timeStr,
+				info.Name)
+
+			totalSize += info.Size
 		}
 
-		fmt.Printf("%9d  %s %s   %s\n",
-			info.Size,
-			dateStr,
-			timeStr,
-			info.Name)
-
 		fmt.Println("---------                     -------")
-		fmt.Printf("%9d                     1 file\n", info.Size)
+		fmt.Printf("%9d                     %d file%s\n", totalSize, len(files), plural(len(files)))
 	}
 }
 
-func testArchive(archivePath string, data []byte, info *compress.FileInfo) {
-	if !*quiet {
-		fmt.Printf("    testing: %-40s ", info.Name)
-	}
-
-	// Create decompressor
+func testArchive(archivePath string, data []byte, files []*compress.FileInfo) {
 	vocab := vocab.Default()
 	decomp := compress.New(vocab)
 
-	// Decompress
-	_, err := decomp.Decompress(data)
-	if err != nil {
-		if !*quiet {
-			fmt.Println("error")
+	errors := 0
+	for _, info := range files {
+		// Skip directories
+		if strings.HasSuffix(info.Name, "/") {
+			continue
 		}
-		fatal("test failed: %v", err)
+
+		if !*quiet {
+			fmt.Printf("    testing: %-40s ", info.Name)
+		}
+
+		_, err := decomp.DecompressFile(data, info)
+		if err != nil {
+			if !*quiet {
+				fmt.Println("error")
+			}
+			fmt.Fprintf(os.Stderr, "  %s: %v\n", info.Name, err)
+			errors++
+		} else {
+			if !*quiet {
+				fmt.Println("OK")
+			}
+		}
 	}
 
-	if !*quiet {
-		fmt.Println("OK")
+	if errors > 0 {
+		fmt.Fprintf(os.Stderr, "%d error(s) detected in %s\n", errors, archivePath)
+		os.Exit(1)
 	}
-
 	fmt.Println("No errors detected in compressed data of", archivePath)
 }
 
-func extractFile(archivePath string, data []byte, info *compress.FileInfo) {
-	// Determine output path
-	outputPath := info.Name
-	if outputPath == "" {
-		// No name stored - use archive name without extension
-		outputPath = filepath.Base(archivePath)
-		outputPath = strings.TrimSuffix(outputPath, ".zip")
-		outputPath = strings.TrimSuffix(outputPath, ".unz")
-	}
-
-	if *junkPaths {
-		outputPath = filepath.Base(outputPath)
-	}
-
-	if *destDir != "" {
-		outputPath = filepath.Join(*destDir, outputPath)
-	}
-
-	// Check if output exists
-	if !*overwrite && !*pipe {
-		if _, err := os.Stat(outputPath); err == nil {
-			if *never {
-				if !*quiet {
-					fmt.Printf("  skipping: %s\n", outputPath)
-				}
-				return
-			}
-			// Prompt (like unzip)
-			fmt.Printf("replace %s? [y]es, [n]o, [A]ll, [N]one: ", outputPath)
-			var response string
-			fmt.Scanln(&response)
-			response = strings.ToLower(response)
-			if response != "y" && response != "yes" && response != "a" && response != "all" {
-				fmt.Println("  skipping:", outputPath)
-				return
-			}
-		}
-	}
-
-	// Create decompressor
+func extractFiles(archivePath string, data []byte, files []*compress.FileInfo, patterns []string) {
 	vocab := vocab.Default()
 	decomp := compress.New(vocab)
 
-	// Decompress
-	if !*quiet && !*pipe {
-		fmt.Printf("  inflating: %s\n", outputPath)
-	}
-
-	output, err := decomp.Decompress(data)
-	if err != nil {
-		fatal("decompression failed: %v", err)
-	}
-
-	// Write output
-	if *pipe {
-		os.Stdout.Write(output)
-	} else {
-		// Create parent directories if needed
-		if dir := filepath.Dir(outputPath); dir != "." {
-			os.MkdirAll(dir, 0755)
+	for _, info := range files {
+		// Check if file matches patterns (if any)
+		if len(patterns) > 0 && !matchesAny(info.Name, patterns) {
+			continue
 		}
 
-		if err := os.WriteFile(outputPath, output, 0644); err != nil {
-			fatal("cannot write '%s': %v", outputPath, err)
+		// Determine output path
+		outputPath := info.Name
+		if *junkPaths {
+			outputPath = filepath.Base(outputPath)
+		}
+		if *destDir != "" {
+			outputPath = filepath.Join(*destDir, outputPath)
 		}
 
-		// Set modification time if available
-		if !info.ModTime.IsZero() {
-			os.Chtimes(outputPath, info.ModTime, info.ModTime)
+		// Handle directory
+		if strings.HasSuffix(info.Name, "/") {
+			if !*pipe {
+				if !*quiet {
+					fmt.Printf("   creating: %s\n", outputPath)
+				}
+				os.MkdirAll(outputPath, info.Mode|0755)
+			}
+			continue
+		}
+
+		// Check if output exists
+		if !*overwrite && !*pipe {
+			if _, err := os.Stat(outputPath); err == nil {
+				if *never {
+					if !*quiet {
+						fmt.Printf("  skipping: %s\n", outputPath)
+					}
+					continue
+				}
+				// Prompt (like unzip)
+				fmt.Printf("replace %s? [y]es, [n]o, [A]ll, [N]one: ", outputPath)
+				var response string
+				fmt.Scanln(&response)
+				response = strings.ToLower(response)
+				if response == "a" || response == "all" {
+					*overwrite = true
+				} else if response == "none" {
+					*never = true
+					fmt.Println("  skipping:", outputPath)
+					continue
+				} else if response != "y" && response != "yes" {
+					fmt.Println("  skipping:", outputPath)
+					continue
+				}
+			}
+		}
+
+		// Decompress
+		if !*quiet && !*pipe {
+			fmt.Printf("  inflating: %s\n", outputPath)
+		}
+
+		content, err := decomp.DecompressFile(data, info)
+		if err != nil {
+			fatal("decompression failed for '%s': %v", info.Name, err)
+		}
+
+		// Write output
+		if *pipe {
+			os.Stdout.Write(content)
+		} else {
+			// Create parent directories if needed
+			if dir := filepath.Dir(outputPath); dir != "." {
+				os.MkdirAll(dir, 0755)
+			}
+
+			if err := os.WriteFile(outputPath, content, info.Mode); err != nil {
+				fatal("cannot write '%s': %v", outputPath, err)
+			}
+
+			// Set modification time if available
+			if !info.ModTime.IsZero() {
+				os.Chtimes(outputPath, info.ModTime, info.ModTime)
+			}
 		}
 	}
+}
+
+// matchesAny checks if name matches any of the patterns.
+func matchesAny(name string, patterns []string) bool {
+	for _, pattern := range patterns {
+		matched, err := filepath.Match(pattern, name)
+		if err == nil && matched {
+			return true
+		}
+		// Also try matching against base name
+		matched, err = filepath.Match(pattern, filepath.Base(name))
+		if err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func usage() {
@@ -265,6 +332,7 @@ Examples:
   unz -v archive.zip               List with details (method, CRC, etc.)
   unz -t archive.zip               Test archive integrity
   unz -d /tmp archive.zip          Extract to /tmp
+  unz archive.zip '*.txt'          Extract only .txt files
   unz -p archive.zip > file        Extract to stdout
 
 `)
