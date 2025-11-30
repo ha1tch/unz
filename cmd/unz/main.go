@@ -239,7 +239,7 @@ func extractFile(archivePath string, data []byte, info *compress.FileInfo) {
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: unz [-ltvqonpj] [-d dir] archive[.zip] [file...]
 
-Extract files from ZIP archive. Supports standard ZIP plus UNZLATE (method 85).
+Extract files from ZIP archive. Supports standard ZIP plus BPE methods.
 
 Options:
   -l        list files (short format)
@@ -257,6 +257,7 @@ Supported methods:
   Method 0  (Stored)  - no compression
   Method 8  (Deflate) - standard ZIP compression
   Method 85 (Unzlate) - BPE + ANS
+  Method 86 (Bpelate) - BPE + DEFLATE
 
 Examples:
   unz archive.zip                  Extract all files

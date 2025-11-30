@@ -58,18 +58,21 @@ Comprehensive benchmarks across 21 content types (7 natural languages, 7 program
 Full interactive report: [benchmarks/report.html](benchmarks/report.html)
 
 ## Installation
+
 ```bash
 go install github.com/ha1tch/unz/cmd/enz@latest
 go install github.com/ha1tch/unz/cmd/unz@latest
 ```
 
 Or build locally:
+
 ```bash
 ./build.sh              # Build to ./bin/
 ./build.sh install      # Install to $GOPATH/bin
 ```
 
 ## Usage
+
 ```bash
 # Compress (auto-selects best method)
 enz archive.zip file.go
@@ -84,6 +87,7 @@ unz -v archive.zip
 ## Auto-Selection Logic
 
 The compressor automatically detects content type and selects the best method:
+
 ```
 if detected as code:
     try DEFLATE, BPELATE with language-specific vocabulary
@@ -165,6 +169,7 @@ The detector identifies 39 content types across four categories:
 ## VocabInfo Extra Field (0x554E)
 
 Bpelate archives include a 4-byte vocabulary descriptor:
+
 ```
 Offset  Size  Field
 0       1     Natural language (human language for comments/docs)
@@ -255,6 +260,7 @@ Pre-trained BPE vocabularies (~1750 tokens each):
 | JavaScript | 1756 | JS/TS source |
 
 ### Custom Vocabularies
+
 ```bash
 mkdict -n 2000 corpus/*.txt > pkg/vocab/custom_tokens.go
 go build ./...
@@ -277,6 +283,7 @@ This creates:
 The overhead is the vocabulary (shared, not embedded) and 4 bytes for VocabInfo.
 
 ## Project Structure
+
 ```
 unz/
 ├── cmd/
@@ -303,6 +310,7 @@ unz/
 ```
 
 ## Scripts
+
 ```bash
 ./build.sh              # Build all binaries to ./bin/
 ./build.sh install      # Install to $GOPATH/bin

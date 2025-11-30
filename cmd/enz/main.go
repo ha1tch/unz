@@ -1,4 +1,4 @@
-// Command enz compresses files using adaptive UNZLATE/DEFLATE compression.
+// Command enz compresses files using adaptive BPE/DEFLATE compression.
 //
 // Usage matches zip(1):
 //
@@ -130,7 +130,7 @@ func main() {
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: enz [-0|-9] [-qvmj] archive[.zip] file
 
-Compress file into ZIP archive using adaptive UNZLATE/DEFLATE compression.
+Compress file into ZIP archive using adaptive BPE/DEFLATE compression.
 Output is standard PKZIP format compatible with unzip, WinZip, etc.
 
 Options:
@@ -144,8 +144,11 @@ Options:
 
 Compression methods:
   Method 0  (Stored)  - no compression
-  Method 8  (Deflate) - standard ZIP compression (code, JSON, binary)
-  Method 85 (Unzlate) - BPE + ANS (natural language text)
+  Method 8  (Deflate) - standard ZIP compression
+  Method 85 (Unzlate) - BPE + ANS (reserved, high overhead)
+  Method 86 (Bpelate) - BPE + DEFLATE (source code, text)
+
+The compressor automatically selects the best method for each file.
 
 Examples:
   enz archive document.txt       Compress document.txt into archive.zip
