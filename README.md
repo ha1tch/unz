@@ -6,6 +6,8 @@ ZIP-compatible compression with adaptive BPE methods.
 
 **unz** creates standard PKZIP format files. It adds two proprietary methods optimized for source code:
 
+
+
 | Method | Code | Pipeline | Best for |
 |--------|------|----------|----------|
 | Stored | 0 | None | Incompressible data |
